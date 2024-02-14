@@ -14,99 +14,6 @@ import (
 	"time"
 )
 
-type IterableSlice[V any] []V
-
-type Iterable[V any] interface {
-	~func(func(V) bool) | ~[]V
-}
-
-type MapIterable[K comparable, V any] interface {
-	~func(func(V) bool) | ~map[K]V
-}
-
-type IntIterable[V any] interface {
-	MapIterable[int, V] | []V
-}
-
-func AsSeq[V any, VS Iterable[V]](it VS) iter.Seq[V] {
-	switch vi := any(it).(type) {
-	case iter.Seq[V]:
-		return vi
-	case []V:
-		return func(yield func(V) bool) {
-			for _, v := range vi {
-				if !yield(v) {
-					return
-				}
-			}
-		}
-	}
-
-	// dealing with derived types, fall back to reflection
-	v := reflect.ValueOf(it)
-	return func(yield func(V) bool) {
-		switch v.Kind() {
-		case reflect.Func:
-			v.Call([]reflect.Value{reflect.ValueOf(yield)})
-		case reflect.Slice:
-			length := v.Len()
-			for i := 0; i < length; i++ {
-				if !yield(v.Index(i).Interface().(V)) {
-					return
-				}
-			}
-		default:
-			panic("unexpected type")
-		}
-	}
-}
-
-func Range(count int) iter.Seq[int] {
-	return func(yield func(int) bool) {
-		for i := 0; i < count; i++ {
-			if !yield(i) {
-				return
-			}
-		}
-	}
-}
-
-func Count() iter.Seq[int] {
-	return func(yield func(int) bool) {
-		for i := 0; ; i++ {
-			if !yield(i) {
-				return
-			}
-		}
-	}
-}
-
-func Enumerate[T any, TS Iterable[T]](it TS) iter.Seq2[int, T] {
-	return func(yield func(int, T) bool) {
-		seq := AsSeq[T](it)
-		next, stop := iter.Pull(seq)
-		defer stop()
-		for i := 0; ; i++ {
-			if t, ok := next(); ok {
-				if !yield(i, t) {
-					return
-				}
-			} else {
-				return
-			}
-		}
-	}
-}
-
-func Map[T, U any, TS Iterable[T]](it TS, f func(T) U) iter.Seq[U] {
-	return func(yield func(U) bool) {
-		seq := AsSeq[T](it)
-		seq(func(t T) bool {
-			return yield(f(t))
-		})
-	}
-}
-
 type Futurer interface {
 	HasResult() bool
 	Err() error
@@ -639,7 +546,7 @@ func (a *AsyncStream) consumeAll() []byte {
 }
 
 func (a *AsyncStream) Stream(ctx context.Context, bufSize int) AsyncIterable[[]byte] {
-	return Iter(func(yield func([]byte) error) error {
+	return AsyncIter(func(yield func([]byte) error) error {
 		for {
 			n, err := a.read(ctx, bufSize)
 			if n > 0 {
@@ -657,7 +564,7 @@ func (a *AsyncStream) Stream(ctx context.Context, bufSize int) AsyncIterable[[]b
 }
 
 func (a *AsyncStream) Chunks(ctx context.Context, chunkSize int) AsyncIterable[[]byte] {
-	return Iter(func(yield func([]byte) error) error {
+	return AsyncIter(func(yield func([]byte) error) error {
 		for {
 			var err error
 			for len(a.buffer) < chunkSize && err == nil {
@@ -691,7 +598,7 @@ func (a *AsyncStream) yieldLines(yield func([]byte) error, data []byte) error {
 }
 
 func (a *AsyncStream) Lines(ctx context.Context) AsyncIterable[[]byte] {
-	return Iter(func(yield func([]byte) error) error {
+	return AsyncIter(func(yield func([]byte) error) error {
 		bufSize := 1024
 		for {
 			n, err := a.read(ctx, bufSize)
@@ -894,20 +801,6 @@ func Sleep(ctx context.Context, duration time.Duration) error {
 	return err
 }
 
-type AsyncIterable[T any] iter.Seq2[T, error]
-
-func (ai AsyncIterable[T]) ForEach(f func(T) error) error {
-	for v, err := range ai {
-		if err != nil {
-			return err
-		}
-		if err := f(v); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func Go[T any](ctx context.Context, f func(ctx context.Context) (T, error)) *Future[T] {
 	loop := RunningLoop(ctx)
 	fut := NewFuture[T]()
@@ -920,18 +813,4 @@ func Go[T any](ctx context.Context, f func(ctx context.Context) (T, error)) *Fut
 		})
 	}()
 	return fut
-}
-
-func Iter[T any](f func(yield func(T) error) error) AsyncIterable[T] {
-	return func(yield func(T, error) bool) {
-		if err := f(func(val T) error {
-			if !yield(val, nil) {
-				return context.Canceled
-			}
-			return nil
-		}); err != nil {
-			var zero T
-			yield(zero, err)
-		}
-	}
 }
