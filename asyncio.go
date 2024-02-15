@@ -8,7 +8,6 @@ import (
 	"iter"
 	"log/slog"
 	"os"
-	"reflect"
 	"slices"
 	"syscall"
 	"time"
@@ -310,21 +309,6 @@ type Yielder func(fut Futurer) error
 
 func RunningLoop(ctx context.Context) *EventLoop {
 	return ctx.Value(runningLoop{}).(*EventLoop)
-}
-
-func selectCase[T any](ch <-chan T) reflect.SelectCase {
-	return reflect.SelectCase{
-		Dir:  reflect.SelectRecv,
-		Chan: reflect.ValueOf(ch),
-	}
-}
-
-func removeIndex[T any](slice *[]T, index int) {
-	var zero T
-	n := len(*slice) - 1
-	(*slice)[index], (*slice)[n] = (*slice)[n], (*slice)[index]
-	(*slice)[n] = zero
-	*slice = (*slice)[:n]
 }
 
 type EventLoop struct {
