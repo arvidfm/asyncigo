@@ -283,12 +283,28 @@ func (t *Task[_]) AddDoneCallback(callback func(error)) Futurer {
 }
 
 type Callback struct {
+	queue    *callbackQueue
 	callback func()
-	doneCh   <-chan time.Time
 	when     time.Time
+	index    int
 }
 
-type callbackQueue []Callback
+func NewCallback(duration time.Duration, callback func()) *Callback {
+	return &Callback{
+		callback: callback,
+		when:     time.Now().Add(duration),
+		index:    -2,
+	}
+}
+
+func (c *Callback) Cancel() bool {
+	if c.queue != nil {
+		return c.queue.Remove(c)
+	}
+	return false
+}
+
+type callbackQueue []*Callback
 
 func (r *callbackQueue) Len() int {
 	return len(*r)
@@ -299,24 +315,40 @@ func (r *callbackQueue) Less(i, j int) bool {
 }
 
 func (r *callbackQueue) Swap(i, j int) {
+	(*r)[i].index = j
+	(*r)[j].index = i
 	(*r)[i], (*r)[j] = (*r)[j], (*r)[i]
 }
 
 func (r *callbackQueue) Push(x any) {
-	*r = append(*r, x.(Callback))
+	callback := x.(*Callback)
+	callback.index = r.Len()
+	callback.queue = r
+	*r = append(*r, callback)
 }
 
 func (r *callbackQueue) Pop() (v any) {
 	n := len(*r)
-	v, *r = (*r)[n-1], (*r)[:n-1]
+	callback := (*r)[n-1]
+	*r = (*r)[:n-1]
+	callback.index = -1
+	callback.queue = nil
 	return v
 }
 
-func (r *callbackQueue) Peek() Callback {
+func (r *callbackQueue) Remove(callback *Callback) bool {
+	if callback.queue == nil || callback.queue != r {
+		return false
+	}
+	heap.Remove(r, callback.index)
+	return true
+}
+
+func (r *callbackQueue) Peek() *Callback {
 	return (*r)[0]
 }
 
-func (r *callbackQueue) Add(c Callback) {
+func (r *callbackQueue) Add(c *Callback) {
 	heap.Push(r, c)
 }
 
@@ -342,7 +374,7 @@ func RunningLoop(ctx context.Context) *EventLoop {
 
 type EventLoop struct {
 	pendingCallbacks    callbackQueue
-	callbacksFromThread chan Callback
+	callbacksFromThread chan *Callback
 
 	poller       Poller
 	currentTasks []Tasker
@@ -350,7 +382,7 @@ type EventLoop struct {
 
 func NewEventLoop() *EventLoop {
 	return &EventLoop{
-		callbacksFromThread: make(chan Callback, 100),
+		callbacksFromThread: make(chan *Callback, 100),
 	}
 }
 
@@ -427,12 +459,10 @@ func (e *EventLoop) Yield(ctx context.Context, fut Futurer) error {
 	return e.currentTask().yield(ctx, fut)
 }
 
-func (e *EventLoop) ScheduleCallback(delay time.Duration, callback func()) {
-	heap.Push(&e.pendingCallbacks, Callback{
-		callback: callback,
-		when:     time.Now().Add(delay),
-		doneCh:   time.After(delay),
-	})
+func (e *EventLoop) ScheduleCallback(delay time.Duration, callback func()) *Callback {
+	handle := NewCallback(delay, callback)
+	e.pendingCallbacks.Add(handle)
+	return handle
 }
 
 func (e *EventLoop) RunCallback(callback func()) {
@@ -440,11 +470,7 @@ func (e *EventLoop) RunCallback(callback func()) {
 }
 
 func (e *EventLoop) RunCallbackThreadsafe(callback func()) {
-	e.callbacksFromThread <- Callback{
-		callback: callback,
-		when:     time.Now(),
-		doneCh:   time.After(0),
-	}
+	e.callbacksFromThread <- NewCallback(0, callback)
 	if e.poller != nil {
 		if err := e.poller.WakeupThreadsafe(); err != nil {
 			slog.Warn("could not wake up event loop from thread", slog.Any("error", err))
@@ -832,8 +858,11 @@ func GetFirstResult[T any](futs ...Awaitable[T]) *Future[T] {
 
 func Sleep(ctx context.Context, duration time.Duration) error {
 	fut := NewFuture[any]()
-	RunningLoop(ctx).ScheduleCallback(duration, func() {
+	handle := RunningLoop(ctx).ScheduleCallback(duration, func() {
 		fut.SetResult(nil, nil)
+	})
+	fut.AddDoneCallback(func(err error) {
+		handle.Cancel()
 	})
 	_, err := fut.Await(ctx)
 	return err
