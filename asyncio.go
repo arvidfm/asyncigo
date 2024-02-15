@@ -17,7 +17,7 @@ type Futurer interface {
 	HasResult() bool
 	Err() error
 	AddDoneCallback(callback func(error)) Futurer
-	Cancel()
+	Cancel(err error)
 }
 
 type Awaitable[T any] interface {
@@ -110,7 +110,7 @@ func (f *Future[ResType]) Await(ctx context.Context) (ResType, error) {
 	f.awaitCallbacks = nil
 
 	yield := ctx.Value(yielder{}).(Yielder)
-	if err := yield(f); err != nil {
+	if err := yield(ctx, f); err != nil {
 		var zero ResType
 		return zero, err
 	}
@@ -125,9 +125,12 @@ func (f *Future[ResType]) MustAwait(ctx context.Context) ResType {
 	return res
 }
 
-func (f *Future[ResType]) Cancel() {
+func (f *Future[ResType]) Cancel(err error) {
+	if err == nil {
+		err = context.Canceled
+	}
 	var zero ResType
-	f.SetResult(zero, context.Canceled)
+	f.SetResult(zero, err)
 }
 
 func (f *Future[ResType]) Shield() *Future[ResType] {
@@ -160,48 +163,69 @@ func (f *Future[ResType]) SetResult(result ResType, err error) {
 	}
 }
 
-type Tasker interface {
-	Step() bool
-	Stop()
-	HasResult() bool
-	Err() error
-}
-
 type Task[RetType any] struct {
-	next      func() (Futurer, bool)
-	stop      func()
-	resultFut *Future[RetType]
+	next       func() (Futurer, bool)
+	stop       func()
+	cancel     context.CancelCauseFunc
+	pendingFut Futurer
+	resultFut  *Future[RetType]
 }
 
 func SpawnTask[RetType any](ctx context.Context, coro Coroutine2[RetType]) *Task[RetType] {
+	ctx, cancel := context.WithCancelCause(ctx)
 	task := &Task[RetType]{
 		resultFut: NewFuture[RetType](),
+		cancel:    cancel,
 	}
 	next, stop := iter.Pull(func(yield func(Futurer) bool) {
-		ctx := context.WithValue(ctx, yielder{}, Yielder(func(fut Futurer) error {
-			if err := ctx.Err(); err != nil {
+		ctx := context.WithValue(ctx, yielder{}, Yielder(func(childCtx context.Context, fut Futurer) error {
+			if err := context.Cause(ctx); err != nil {
+				task.resultFut.Cancel(err)
+				fut.Cancel(err)
+				return task.Err()
+			}
+			if err := childCtx.Err(); err != nil {
+				fut.Cancel(err)
 				return err
 			}
 			if !yield(fut) {
-				return context.Canceled
+				task.resultFut.Cancel(nil)
+				return task.Err()
+			}
+			if err := context.Cause(ctx); err != nil {
+				task.resultFut.Cancel(err)
+				return task.Err()
 			}
 			return nil
 		}))
 		task.resultFut.SetResult(coro(ctx))
 	})
+	task.resultFut.AddDoneCallback(func(err error) {
+		if task.pendingFut != nil {
+			task.pendingFut.Cancel(nil)
+		}
+		task.cancel(err)
+	})
 	task.next = next
 	task.stop = stop
-	task.Step()
+
+	// don't start the coroutine if the context has already been cancelled
+	if err := context.Cause(ctx); err != nil {
+		task.resultFut.Cancel(err)
+	} else {
+		task.Step()
+	}
 	return task
 }
 
-func (t *Task[_]) Step() bool {
-	if pendingFut, ok := t.next(); ok {
-		pendingFut.AddDoneCallback(func(err error) {
+func (t *Task[_]) Step() (ok bool) {
+	if t.pendingFut, ok = t.next(); ok {
+		t.pendingFut.AddDoneCallback(func(err error) {
 			t.Step()
 		})
 		return true
 	} else {
+		t.pendingFut = nil
 		t.stop()
 		return false
 	}
@@ -236,8 +260,8 @@ func (t *Task[RetType]) WriteResultTo(dst *RetType) Awaitable[RetType] {
 	return t
 }
 
-func (t *Task[_]) Cancel() {
-	t.resultFut.Cancel()
+func (t *Task[_]) Cancel(err error) {
+	t.resultFut.Cancel(err)
 }
 
 func (t *Task[RetType]) AddResultCallback(callback func(result RetType, err error)) Awaitable[RetType] {
@@ -305,7 +329,7 @@ func (r *callbackQueue) Empty() bool {
 type yielder struct{}
 type runningLoop struct{}
 
-type Yielder func(fut Futurer) error
+type Yielder func(childCtx context.Context, fut Futurer) error
 
 func RunningLoop(ctx context.Context) *EventLoop {
 	return ctx.Value(runningLoop{}).(*EventLoop)
@@ -734,7 +758,7 @@ func Wait(mode WaitMode, futs ...Futurer) *Future[any] {
 	waitFut := NewFuture[any]()
 	waitFut.AddResultCallback(func(_ any, err error) {
 		for _, fut := range futs {
-			fut.Cancel()
+			fut.Cancel(nil)
 		}
 	})
 
@@ -762,7 +786,7 @@ func GetFirstResult[T any](futs ...Awaitable[T]) *Future[T] {
 	waitFut := NewFuture[T]()
 	waitFut.AddResultCallback(func(_ T, err error) {
 		for _, fut := range futs {
-			fut.Cancel()
+			fut.Cancel(nil)
 		}
 	})
 
