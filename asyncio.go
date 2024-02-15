@@ -830,30 +830,37 @@ func Wait(mode WaitMode, futs ...Futurer) *Future[any] {
 	return waitFut
 }
 
-// GetFirstResult returns the result of the first successful Future.
-// Once a Future succeeds, all other futures will be cancelled.
-// If no Futures succeeded, the last error is returned.
-func GetFirstResult[T any](futs ...Awaitable[T]) *Future[T] {
+// GetFirstResult returns the result of the first successful coroutine.
+// Once a coroutine succeeds, all other futures will be cancelled.
+// If no coroutine succeeds, the last error is returned.
+func GetFirstResult[T any](ctx context.Context, coros ...Coroutine2[T]) (T, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	tasks := make([]*Task[T], 0, len(coros))
+
 	var done int
 	waitFut := NewFuture[T]()
 	waitFut.AddResultCallback(func(_ T, err error) {
-		for _, fut := range futs {
-			fut.Cancel(nil)
+		// prevent new tasks from spawning
+		cancel()
+		// cancel any already started tasks
+		for _, t := range tasks {
+			t.Cancel(nil)
 		}
 	})
 
-	for _, fut := range futs {
-		fut.AddResultCallback(func(result T, err error) {
+	for i, coro := range coros {
+		tasks = append(tasks, SpawnTask(ctx, coro))
+		tasks[i].AddResultCallback(func(result T, err error) {
 			done++
 			if err == nil {
 				waitFut.SetResult(result, nil)
-			} else if done >= len(futs) {
+			} else if done >= len(coros) {
 				waitFut.SetResult(result, err)
 			}
 		})
 	}
 
-	return waitFut
+	return waitFut.Await(ctx)
 }
 
 func Sleep(ctx context.Context, duration time.Duration) error {

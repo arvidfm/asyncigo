@@ -134,15 +134,14 @@ func (e *EpollPoller) Dial(ctx context.Context, network, address string) (conn A
 	}
 
 	// try to connect in parallel and return the first successful connection
-	addrs = addrs[:1]
-	futs := make([]Awaitable[*EpollAsyncFile], len(addrs))
+	futs := make([]Coroutine2[*EpollAsyncFile], len(addrs))
 	for i, addr := range addrs {
-		futs[i] = SpawnTask(ctx, func(ctx context.Context) (*EpollAsyncFile, error) {
+		futs[i] = func(ctx context.Context) (*EpollAsyncFile, error) {
 			return e.dialSingle(ctx, addr, portNum)
-		})
+		}
 	}
 
-	return GetFirstResult(futs...).Await(ctx)
+	return GetFirstResult(ctx, futs...)
 }
 
 func (e *EpollPoller) dialSingle(ctx context.Context, addr net.IPAddr, port int) (*EpollAsyncFile, error) {
@@ -169,7 +168,10 @@ func (e *EpollPoller) dialSingle(ctx context.Context, addr net.IPAddr, port int)
 				_ = f.Close()
 				return nil, err
 			}
-		} else if err != nil {
+			continue
+		}
+
+		if err != nil {
 			_ = f.Close()
 			return nil, err
 		} else {
