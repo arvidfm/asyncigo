@@ -600,21 +600,26 @@ func (a *AsyncStream) yieldLines(yield func([]byte) error, data []byte) error {
 func (a *AsyncStream) Lines(ctx context.Context) AsyncIterable[[]byte] {
 	return AsyncIter(func(yield func([]byte) error) error {
 		bufSize := 1024
+		scanned := 0
 		for {
-			n, err := a.read(ctx, bufSize)
+			_, err := a.read(ctx, bufSize)
 			if errors.Is(err, io.EOF) {
 				return a.yieldLines(yield, a.consumeAll())
 			} else if err != nil {
 				return err
 			}
 
-			for i := len(a.buffer) - 1; i >= len(a.buffer)-n; i-- {
+			for i := len(a.buffer) - 1; i >= scanned; i-- {
 				if a.buffer[i] == '\n' {
 					if err := a.yieldLines(yield, a.consume(i+1)); err != nil {
 						return err
 					}
 					break
 				}
+			}
+			scanned = len(a.buffer)
+			if len(a.buffer) >= bufSize {
+				bufSize *= 2
 			}
 		}
 	})
