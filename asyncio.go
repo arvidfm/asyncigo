@@ -20,6 +20,11 @@ type Futurer interface {
 	Cancel(err error)
 }
 
+type Tasker interface {
+	Futurer
+	yield(ctx context.Context, fut Futurer) error
+}
+
 type Awaitable[T any] interface {
 	Futurer
 	Await(ctx context.Context) (T, error)
@@ -27,16 +32,16 @@ type Awaitable[T any] interface {
 	AddResultCallback(callback func(result T, err error)) Awaitable[T]
 	WriteResultTo(dst *T) Awaitable[T]
 	Future() *Future[T]
+	Result() (T, error)
 }
 
 type Future[ResType any] struct {
-	ctx            context.Context
-	done           bool
-	err            error
-	result         ResType
-	callbacks      []func(ResType, error)
-	awaitCallbacks []func(*Future[ResType], *EventLoop)
-	name           string
+	ctx       context.Context
+	done      bool
+	err       error
+	result    ResType
+	callbacks []func(ResType, error)
+	name      string
 }
 
 func NewFuture[ResType any]() *Future[ResType] {
@@ -97,20 +102,8 @@ func (f *Future[ResType]) WriteResultTo(dest *ResType) Awaitable[ResType] {
 	})
 }
 
-func (f *Future[ResType]) OnAwait(callback func(fut *Future[ResType], loop *EventLoop)) *Future[ResType] {
-	f.awaitCallbacks = append(f.awaitCallbacks, callback)
-	return f
-}
-
 func (f *Future[ResType]) Await(ctx context.Context) (ResType, error) {
-	loop := RunningLoop(ctx)
-	for _, callback := range f.awaitCallbacks {
-		callback(f, loop)
-	}
-	f.awaitCallbacks = nil
-
-	yield := ctx.Value(yielder{}).(Yielder)
-	if err := yield(ctx, f); err != nil {
+	if err := RunningLoop(ctx).Yield(ctx, f); err != nil {
 		var zero ResType
 		return zero, err
 	}
@@ -164,6 +157,9 @@ func (f *Future[ResType]) SetResult(result ResType, err error) {
 }
 
 type Task[RetType any] struct {
+	loop    *EventLoop
+	yielder func(coroCtx context.Context, fut Futurer) error
+
 	next       func() (Futurer, bool)
 	stop       func()
 	cancel     context.CancelCauseFunc
@@ -174,11 +170,12 @@ type Task[RetType any] struct {
 func SpawnTask[RetType any](ctx context.Context, coro Coroutine2[RetType]) *Task[RetType] {
 	ctx, cancel := context.WithCancelCause(ctx)
 	task := &Task[RetType]{
+		loop:      RunningLoop(ctx),
 		resultFut: NewFuture[RetType](),
 		cancel:    cancel,
 	}
 	next, stop := iter.Pull(func(yield func(Futurer) bool) {
-		ctx := context.WithValue(ctx, yielder{}, Yielder(func(childCtx context.Context, fut Futurer) error {
+		task.yielder = func(childCtx context.Context, fut Futurer) error {
 			if err := context.Cause(ctx); err != nil {
 				task.resultFut.Cancel(err)
 				fut.Cancel(err)
@@ -197,7 +194,7 @@ func SpawnTask[RetType any](ctx context.Context, coro Coroutine2[RetType]) *Task
 				return task.Err()
 			}
 			return nil
-		}))
+		}
 		task.resultFut.SetResult(coro(ctx))
 	})
 	task.resultFut.AddDoneCallback(func(err error) {
@@ -219,7 +216,10 @@ func SpawnTask[RetType any](ctx context.Context, coro Coroutine2[RetType]) *Task
 }
 
 func (t *Task[_]) Step() (ok bool) {
-	if t.pendingFut, ok = t.next(); ok {
+	t.loop.withTask(t, func() {
+		t.pendingFut, ok = t.next()
+	})
+	if ok {
 		t.pendingFut.AddDoneCallback(func(err error) {
 			t.Step()
 		})
@@ -235,8 +235,16 @@ func (t *Task[_]) Stop() {
 	t.stop()
 }
 
+func (t *Task[_]) yield(ctx context.Context, fut Futurer) error {
+	return t.yielder(ctx, fut)
+}
+
 func (t *Task[_]) HasResult() bool {
 	return t.resultFut.HasResult()
+}
+
+func (t *Task[RetType]) Result() (RetType, error) {
+	return t.resultFut.Result()
 }
 
 func (t *Task[_]) Err() error {
@@ -326,10 +334,7 @@ func (r *callbackQueue) Empty() bool {
 	return r.Len() == 0
 }
 
-type yielder struct{}
 type runningLoop struct{}
-
-type Yielder func(childCtx context.Context, fut Futurer) error
 
 func RunningLoop(ctx context.Context) *EventLoop {
 	return ctx.Value(runningLoop{}).(*EventLoop)
@@ -339,7 +344,8 @@ type EventLoop struct {
 	pendingCallbacks    callbackQueue
 	callbacksFromThread chan Callback
 
-	poller Poller
+	poller       Poller
+	currentTasks []Tasker
 }
 
 func NewEventLoop() *EventLoop {
@@ -399,6 +405,26 @@ func (e *EventLoop) runReadyCallbacks(ctx context.Context) {
 	for ctx.Err() == nil && !e.pendingCallbacks.Empty() && e.pendingCallbacks.TimeUntilFirst() <= 0 {
 		e.pendingCallbacks.RunFirst()
 	}
+}
+
+func (e *EventLoop) withTask(t Tasker, step func()) {
+	oldTasks := e.currentTasks
+	e.currentTasks = append(e.currentTasks, t)
+
+	step()
+
+	if e.currentTask() != t {
+		panic("context switched from unexpected task")
+	}
+	e.currentTasks = oldTasks
+}
+
+func (e *EventLoop) currentTask() Tasker {
+	return e.currentTasks[len(e.currentTasks)-1]
+}
+
+func (e *EventLoop) Yield(ctx context.Context, fut Futurer) error {
+	return e.currentTask().yield(ctx, fut)
 }
 
 func (e *EventLoop) ScheduleCallback(delay time.Duration, callback func()) {
@@ -805,12 +831,11 @@ func GetFirstResult[T any](futs ...Awaitable[T]) *Future[T] {
 }
 
 func Sleep(ctx context.Context, duration time.Duration) error {
-	callTime := time.Now()
-	_, err := NewFuture[any]().OnAwait(func(fut *Future[any], loop *EventLoop) {
-		loop.ScheduleCallback(duration-time.Since(callTime), func() {
-			fut.SetResult(nil, nil)
-		})
-	}).Await(ctx)
+	fut := NewFuture[any]()
+	RunningLoop(ctx).ScheduleCallback(duration, func() {
+		fut.SetResult(nil, nil)
+	})
+	_, err := fut.Await(ctx)
 	return err
 }
 
@@ -818,7 +843,7 @@ func Go[T any](ctx context.Context, f func(ctx context.Context) (T, error)) *Fut
 	loop := RunningLoop(ctx)
 	fut := NewFuture[T]()
 
-	goroCtx := context.WithValue(context.WithValue(ctx, runningLoop{}, nil), yielder{}, nil)
+	goroCtx := context.WithValue(ctx, runningLoop{}, nil)
 	go func() {
 		result, err := f(goroCtx)
 		loop.RunCallbackThreadsafe(func() {
