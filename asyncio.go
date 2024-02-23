@@ -1,13 +1,14 @@
 package asyncio_go
 
 import (
+	"bytes"
 	"container/heap"
 	"context"
 	"errors"
+	"golang.org/x/sys/unix"
 	"io"
 	"iter"
 	"log/slog"
-	"os"
 	"slices"
 	"syscall"
 	"time"
@@ -178,11 +179,15 @@ func SpawnTask[RetType any](ctx context.Context, coro Coroutine2[RetType]) *Task
 		task.yielder = func(childCtx context.Context, fut Futurer) error {
 			if err := context.Cause(ctx); err != nil {
 				task.resultFut.Cancel(err)
-				fut.Cancel(err)
+				if fut != nil {
+					fut.Cancel(err)
+				}
 				return task.Err()
 			}
 			if err := childCtx.Err(); err != nil {
-				fut.Cancel(err)
+				if fut != nil {
+					fut.Cancel(err)
+				}
 				return err
 			}
 			if !yield(fut) {
@@ -206,12 +211,19 @@ func SpawnTask[RetType any](ctx context.Context, coro Coroutine2[RetType]) *Task
 	task.next = next
 	task.stop = stop
 
-	// don't start the coroutine if the context has already been cancelled
-	if err := context.Cause(ctx); err != nil {
-		task.resultFut.Cancel(err)
-	} else {
-		task.Step()
-	}
+	// ensure we yield to the event loop once
+	// before starting the coroutine so the task
+	// can't finish before SpawnTask returns
+	task.loop.RunCallback(func() {
+		// don't start the coroutine if it or the context has already been cancelled
+		if task.resultFut.HasResult() {
+			return
+		} else if err := context.Cause(ctx); err != nil {
+			task.resultFut.Cancel(err)
+		} else {
+			task.Step()
+		}
+	})
 	return task
 }
 
@@ -220,9 +232,15 @@ func (t *Task[_]) Step() (ok bool) {
 		t.pendingFut, ok = t.next()
 	})
 	if ok {
-		t.pendingFut.AddDoneCallback(func(err error) {
-			t.Step()
-		})
+		if t.pendingFut != nil {
+			t.pendingFut.AddDoneCallback(func(err error) {
+				t.Step()
+			})
+		} else {
+			t.loop.RunCallback(func() {
+				t.Step()
+			})
+		}
 		return true
 	} else {
 		t.pendingFut = nil
@@ -375,6 +393,7 @@ func RunningLoop(ctx context.Context) *EventLoop {
 type EventLoop struct {
 	pendingCallbacks    callbackQueue
 	callbacksFromThread chan *Callback
+	callbacksDoneFut    *Future[any]
 
 	poller       Poller
 	currentTasks []Tasker
@@ -394,6 +413,7 @@ func (e *EventLoop) Run(ctx context.Context, main Coroutine1) error {
 	if e.poller, err = NewPoller(); err != nil {
 		return err
 	}
+	defer e.poller.Close()
 
 	ctx = context.WithValue(ctx, runningLoop{}, e)
 	mainTask := main.SpawnTask(ctx).Future().AddDoneCallback(func(err error) {
@@ -406,6 +426,12 @@ func (e *EventLoop) Run(ctx context.Context, main Coroutine1) error {
 		e.addCallbacksFromThread(ctx)
 		e.runReadyCallbacks(ctx)
 
+		if e.callbacksDoneFut != nil && e.pendingCallbacks.Empty() {
+			e.callbacksDoneFut.SetResult(nil, nil)
+			e.callbacksDoneFut = nil
+			continue
+		}
+
 		if ctx.Err() != nil || (mainTask.HasResult() && e.pendingCallbacks.Empty()) {
 			break
 		}
@@ -414,6 +440,13 @@ func (e *EventLoop) Run(ctx context.Context, main Coroutine1) error {
 		if !e.pendingCallbacks.Empty() {
 			timeout = e.pendingCallbacks.TimeUntilFirst()
 		}
+		if deadline, ok := ctx.Deadline(); ok {
+			untilDeadline := time.Until(deadline)
+			if untilDeadline < timeout {
+				timeout = untilDeadline
+			}
+		}
+
 		if err := e.poller.Wait(timeout); err != nil {
 			return err
 		}
@@ -478,6 +511,13 @@ func (e *EventLoop) RunCallbackThreadsafe(callback func()) {
 	}
 }
 
+func (e *EventLoop) WaitForCallbacks() *Future[any] {
+	if e.callbacksDoneFut == nil {
+		e.callbacksDoneFut = NewFuture[any]()
+	}
+	return e.callbacksDoneFut
+}
+
 func (e *EventLoop) NewAsyncStream(fd uintptr) (*AsyncStream, error) {
 	f, err := e.poller.Open(fd)
 	if err != nil {
@@ -487,19 +527,20 @@ func (e *EventLoop) NewAsyncStream(fd uintptr) (*AsyncStream, error) {
 }
 
 func (e *EventLoop) Pipe() (r *AsyncStream, w *AsyncStream, err error) {
-	rf, wf, err := os.Pipe()
-	if err != nil {
+	p := make([]int, 2)
+	if err := unix.Pipe(p); err != nil {
 		return nil, nil, err
 	}
+	rf, wf := p[0], p[1]
 
-	if r, err = e.NewAsyncStream(rf.Fd()); err != nil {
-		_ = rf.Close()
-		_ = wf.Close()
+	if r, err = e.NewAsyncStream(uintptr(rf)); err != nil {
+		_ = unix.Close(rf)
+		_ = unix.Close(wf)
 		return nil, nil, err
 	}
-	if w, err = e.NewAsyncStream(wf.Fd()); err != nil {
-		_ = rf.Close()
-		_ = wf.Close()
+	if w, err = e.NewAsyncStream(uintptr(wf)); err != nil {
+		_ = unix.Close(rf)
+		_ = unix.Close(wf)
 		_ = r.Close()
 		return nil, nil, err
 	}
@@ -727,6 +768,15 @@ func (a *AsyncStream) ReadChunk(ctx context.Context, chunkSize int) ([]byte, err
 	return nil, err
 }
 
+func (a *AsyncStream) ReadAll(ctx context.Context) ([]byte, error) {
+	var buf bytes.Buffer
+	var err error
+	for chunk := range a.Stream(ctx, 1024).UntilErr(&err) {
+		buf.Write(chunk)
+	}
+	return buf.Bytes(), err
+}
+
 type Queue[T any] struct {
 	data []T
 	futs []*Future[T]
@@ -808,11 +858,6 @@ func Wait(mode WaitMode, futs ...Futurer) *Future[any] {
 	var done int
 	var futErr error
 	waitFut := NewFuture[any]()
-	waitFut.AddResultCallback(func(_ any, err error) {
-		for _, fut := range futs {
-			fut.Cancel(nil)
-		}
-	})
 
 	for _, fut := range futs {
 		fut.AddDoneCallback(func(err error) {
@@ -831,7 +876,7 @@ func Wait(mode WaitMode, futs ...Futurer) *Future[any] {
 }
 
 // GetFirstResult returns the result of the first successful coroutine.
-// Once a coroutine succeeds, all other futures will be cancelled.
+// Once a coroutine succeeds, all other coroutines will be cancelled.
 // If no coroutine succeeds, the last error is returned.
 func GetFirstResult[T any](ctx context.Context, coros ...Coroutine2[T]) (T, error) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -855,7 +900,7 @@ func GetFirstResult[T any](ctx context.Context, coros ...Coroutine2[T]) (T, erro
 			if err == nil {
 				waitFut.SetResult(result, nil)
 			} else if done >= len(coros) {
-				waitFut.SetResult(result, err)
+				waitFut.Cancel(err)
 			}
 		})
 	}

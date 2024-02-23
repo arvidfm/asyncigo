@@ -7,6 +7,7 @@ import (
 )
 
 type Poller interface {
+	Close() error
 	Wait(timeout time.Duration) error
 	WakeupThreadsafe() error
 	Open(fd uintptr) (AsyncFder, error)

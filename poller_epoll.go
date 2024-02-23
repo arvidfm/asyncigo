@@ -49,6 +49,10 @@ func NewPoller() (Poller, error) {
 	return poller, nil
 }
 
+func (e *EpollPoller) Close() error {
+	return unix.Close(e.epfd)
+}
+
 func (e *EpollPoller) Wait(timeout time.Duration) error {
 	n, err := unix.EpollWait(e.epfd, e.events, max(0, int(timeout.Milliseconds())))
 	if err != nil {
