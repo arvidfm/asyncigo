@@ -1,8 +1,9 @@
-package asyncio_go
+package asyngio
 
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -141,6 +142,58 @@ func TestSleep(t *testing.T) {
 	}
 }
 
+func TestFuture_Result(t *testing.T) {
+	fut1 := NewFuture[int]()
+	_, err := fut1.Result()
+	if !errors.Is(err, ErrNotReady) {
+		t.Errorf("Result(): expected ErrNotReady, got: %v", err)
+	}
+
+	fut1.SetResult(10, nil)
+	result, err := fut1.Result()
+	if result != 10 {
+		t.Errorf("Result(): expected 10, got: %d", result)
+	}
+	if err != nil {
+		t.Errorf("Result(): expected nil error, got: %v", err)
+	}
+
+	fut1.Cancel(nil)
+	fut1.SetResult(42, errors.New("oops"))
+
+	result, err = fut1.Result()
+	if result != 10 {
+		t.Errorf("Result(): expected 10, got: %d", result)
+	}
+	if err != nil {
+		t.Errorf("Result(): expected nil error, got: %v", err)
+	}
+
+	fut2 := NewFuture[int]()
+	fut2.Cancel(nil)
+	_, err = fut2.Result()
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Result(): expected context.Canceled, got: %v", err)
+	}
+
+	fut3 := NewFuture[int]()
+	fut3.Cancel(sql.ErrNoRows)
+	_, err = fut3.Result()
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("Result(): expected sql.ErrNoRows, got: %v", err)
+	}
+
+	fut4 := NewFuture[int]()
+	fut4.SetResult(42, sql.ErrConnDone)
+	result, err = fut4.Result()
+	if result != 42 {
+		t.Errorf("Result(): expected 42, got: %d", result)
+	}
+	if !errors.Is(err, sql.ErrConnDone) {
+		t.Errorf("Result(): expected sql.ErrConnDone, got: %v", err)
+	}
+}
+
 func TestGoroutineHasNoLoop(t *testing.T) {
 	testEventLoop(t, "goroutine has no loop", false, -1, func(ctx context.Context, loop *EventLoop, t *testing.T) error {
 		result, err := Go(ctx, func(ctx context.Context) (result int, err error) {
@@ -252,19 +305,19 @@ func TestAsyncStream(t *testing.T) {
 	}{
 		{
 			name: "many lines",
-			file: "data_1.txt",
+			file: "stream_1.txt",
 		},
 		{
 			name: "long line",
-			file: "data_2.txt",
+			file: "stream_2.txt",
 		},
 		{
 			name: "empty file",
-			file: "data_3.txt",
+			file: "stream_3.txt",
 		},
 		{
 			name: "only newlines",
-			file: "data_4.txt",
+			file: "stream_4.txt",
 		},
 	}
 
@@ -323,8 +376,14 @@ func TestAsyncStream(t *testing.T) {
 		{
 			name: "Chunks",
 			read: func(ctx context.Context, writer io.Writer, stream *AsyncStream) (err error) {
-				for line := range stream.Chunks(ctx, 100).UntilErr(&err) {
-					writer.Write(line)
+				chunkSize := 100
+				var previousChunk []byte
+				for chunk := range stream.Chunks(ctx, chunkSize).UntilErr(&err) {
+					if previousChunk != nil && len(previousChunk) != chunkSize {
+						return fmt.Errorf("expected a chunk size of %d, got: %d", chunkSize, len(previousChunk))
+					}
+					previousChunk = chunk
+					writer.Write(chunk)
 				}
 				return err
 			},

@@ -1,6 +1,6 @@
 //go:build linux && epoll
 
-package asyncio_go
+package asyngio
 
 import (
 	"context"
@@ -14,15 +14,18 @@ import (
 	"time"
 )
 
+// EpollPoller is an epoll-backed [Poller] implementation.
 type EpollPoller struct {
 	epfd     int
 	waker    io.ReadWriteCloser
 	wakerBuf []byte
 
-	subscribed map[int32]AsyncFder
+	subscribed map[int32]AsyncReadWriteCloser
 	events     []unix.EpollEvent
 }
 
+// NewPoller constructs a new EpollPoller.
+// Will fail if an epoll handle could not be created.
 func NewPoller() (Poller, error) {
 	epfd, err := unix.EpollCreate1(0)
 	if err != nil {
@@ -32,8 +35,8 @@ func NewPoller() (Poller, error) {
 	poller := &EpollPoller{
 		epfd:       epfd,
 		wakerBuf:   make([]byte, 8),
-		subscribed: make(map[int32]AsyncFder),
-		events:     make([]unix.EpollEvent, 10),
+		subscribed: make(map[int32]AsyncReadWriteCloser),
+		events:     make([]unix.EpollEvent, 100),
 	}
 
 	// eventfd for waking up the poller from another thread
@@ -49,10 +52,12 @@ func NewPoller() (Poller, error) {
 	return poller, nil
 }
 
+// Close implements [Poller].
 func (e *EpollPoller) Close() error {
 	return unix.Close(e.epfd)
 }
 
+// Wait implements [Poller].
 func (e *EpollPoller) Wait(timeout time.Duration) error {
 	n, err := unix.EpollWait(e.epfd, e.events, max(0, int(timeout.Milliseconds())))
 	if err != nil {
@@ -72,6 +77,7 @@ func (e *EpollPoller) Wait(timeout time.Duration) error {
 	return nil
 }
 
+// WakeupThreadsafe implements [Poller].
 func (e *EpollPoller) WakeupThreadsafe() error {
 	buf := make([]byte, 8)
 	binary.NativeEndian.PutUint64(buf, 1)
@@ -79,7 +85,8 @@ func (e *EpollPoller) WakeupThreadsafe() error {
 	return err
 }
 
-func (e *EpollPoller) Subscribe(target AsyncFder) error {
+// Subscribe instructs the poller to start listening for events for the given file handle.
+func (e *EpollPoller) Subscribe(target *EpollAsyncFile) error {
 	fd := int(target.Fd())
 	if err := unix.SetNonblock(fd, true); err != nil {
 		return err
@@ -94,24 +101,47 @@ func (e *EpollPoller) Subscribe(target AsyncFder) error {
 	return nil
 }
 
-func (e *EpollPoller) Unsubscribe(target AsyncFder) error {
+// Unsubscribe instructs the poller to stop listening for events for the given file handle.
+func (e *EpollPoller) Unsubscribe(target *EpollAsyncFile) error {
 	fd := int(target.Fd())
 	delete(e.subscribed, int32(fd))
 	return unix.EpollCtl(e.epfd, unix.EPOLL_CTL_DEL, fd, nil)
 }
 
-func (e *EpollPoller) Open(fd uintptr) (file AsyncFder, err error) {
-	f := &EpollAsyncFile{
-		f:      os.NewFile(fd, ""),
-		poller: e,
-	}
+// Open wraps the given file descriptor and subscribes to its events.
+func (e *EpollPoller) Open(fd uintptr) (file AsyncReadWriteCloser, err error) {
+	f := NewEpollAsyncFile(e, os.NewFile(fd, ""))
 	if err := e.Subscribe(f); err != nil {
 		return nil, err
 	}
 	return f, nil
 }
 
-func (e *EpollPoller) Dial(ctx context.Context, network, address string) (conn AsyncFder, err error) {
+// Pipe implements [Poller].
+func (e *EpollPoller) Pipe() (r, w AsyncReadWriteCloser, err error) {
+	p := make([]int, 2)
+	if err := unix.Pipe(p); err != nil {
+		return nil, nil, err
+	}
+	rf, wf := p[0], p[1]
+
+	if r, err = e.Open(uintptr(rf)); err != nil {
+		_ = unix.Close(rf)
+		_ = unix.Close(wf)
+		return nil, nil, err
+	}
+	if w, err = e.Open(uintptr(wf)); err != nil {
+		_ = unix.Close(rf)
+		_ = unix.Close(wf)
+		_ = r.Close()
+		return nil, nil, err
+	}
+
+	return r, w, nil
+}
+
+// Dial implements [Poller].
+func (e *EpollPoller) Dial(ctx context.Context, network, address string) (conn AsyncReadWriteCloser, err error) {
 	if network != "tcp" {
 		return nil, errors.New("unsupported connection type")
 	}
@@ -195,12 +225,21 @@ func (e *EpollPoller) toSockAddr(addr net.IPAddr, port int) (domain int, sockAdd
 	}
 }
 
+// Fder represents a file handle that has an associated file descriptor.
+type Fder interface {
+	io.ReadWriteCloser
+	// Fd returns the file descriptor of this handle.
+	Fd() uintptr
+}
+
+// EpollAsyncFile is an implementation of [AsyncReadWriteCloser] for [EpollPoller].
 type EpollAsyncFile struct {
 	poller   *EpollPoller
 	f        Fder
 	readyFut *Future[any]
 }
 
+// NewEpollAsyncFile wraps the given file handle using an [EpollAsyncFile].
 func NewEpollAsyncFile(poller *EpollPoller, f Fder) *EpollAsyncFile {
 	eaf := &EpollAsyncFile{
 		f:      f,
@@ -210,39 +249,47 @@ func NewEpollAsyncFile(poller *EpollPoller, f Fder) *EpollAsyncFile {
 	return eaf
 }
 
+// NotifyReady implements [AsyncReadWriteCloser].
 func (eaf *EpollAsyncFile) NotifyReady() {
 	if eaf.readyFut != nil {
 		eaf.readyFut.SetResult(nil, nil)
 	}
 }
 
+// WaitForReady implements [AsyncReadWriteCloser].
 func (eaf *EpollAsyncFile) WaitForReady(ctx context.Context) error {
 	eaf.readyFut = NewFuture[any]()
 	_, err := eaf.readyFut.Await(ctx)
 	return err
 }
 
+// Read implements [io.Reader].
 func (eaf *EpollAsyncFile) Read(p []byte) (n int, err error) {
 	return eaf.f.Read(p)
 }
 
+// Write implements [io.Writer].
 func (eaf *EpollAsyncFile) Write(p []byte) (n int, err error) {
 	return eaf.f.Write(p)
 }
 
+// Close implements [io.Closer].
 func (eaf *EpollAsyncFile) Close() error {
 	_ = eaf.poller.Unsubscribe(eaf)
 	return eaf.f.Close()
 }
 
+// Fd implements [Fder].
 func (eaf *EpollAsyncFile) Fd() uintptr {
 	return eaf.f.Fd()
 }
 
+// EpollSocket is a wrapper for a low-level socket file descriptor.
 type EpollSocket struct {
 	fd int
 }
 
+// Read implements [io.Reader].
 func (s *EpollSocket) Read(p []byte) (n int, err error) {
 	n, err = unix.Read(s.fd, p)
 	if n == 0 && err == nil {
@@ -251,18 +298,22 @@ func (s *EpollSocket) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
+// Write implements [io.Writer].
 func (s *EpollSocket) Write(p []byte) (n int, err error) {
 	return unix.Write(s.fd, p)
 }
 
+// Close implements [io.Closer].
 func (s *EpollSocket) Close() error {
 	return unix.Close(s.fd)
 }
 
+// Fd implements [Fder].
 func (s *EpollSocket) Fd() uintptr {
 	return uintptr(s.fd)
 }
 
+// NewSocket wraps the given file descriptor using an [EpollSocket].
 func NewSocket(fd int) *EpollSocket {
 	s := &EpollSocket{fd: fd}
 	runtime.SetFinalizer(s, func(s *EpollSocket) { _ = s.Close() })

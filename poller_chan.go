@@ -1,6 +1,6 @@
 //go:build !linux || !epoll
 
-package asyncio_go
+package asyngio
 
 import (
 	"time"
