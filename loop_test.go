@@ -33,6 +33,9 @@ func testEventLoop(t *testing.T, name string, wantErr bool, wantRuntime time.Dur
 		err := loop.Run(ctx, func(ctx context.Context) error {
 			return main(ctx, loop, t)
 		})
+		if errors.Is(err, ErrNotImplemented) {
+			t.Skipf("function not supported on this platform")
+		}
 		elapsed := time.Since(start)
 
 		tolerance := wantRuntime.Seconds() / 20

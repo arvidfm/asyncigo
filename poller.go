@@ -2,8 +2,14 @@ package asyngio
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
+)
+
+var (
+	// ErrNotImplemented is returned by a Poller implementation for functions it does not support.
+	ErrNotImplemented = errors.New("this function is not supported by this implementation")
 )
 
 // Poller represents a type that can wait for multiple I/O events simultaneously.
