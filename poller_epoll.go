@@ -20,7 +20,7 @@ type EpollPoller struct {
 	waker    io.ReadWriteCloser
 	wakerBuf []byte
 
-	subscribed map[int32]AsyncReadWriteCloser
+	subscribed map[int32]*EpollAsyncFile
 	events     []unix.EpollEvent
 }
 
@@ -35,7 +35,7 @@ func NewPoller() (Poller, error) {
 	poller := &EpollPoller{
 		epfd:       epfd,
 		wakerBuf:   make([]byte, 8),
-		subscribed: make(map[int32]AsyncReadWriteCloser),
+		subscribed: make(map[int32]*EpollAsyncFile),
 		events:     make([]unix.EpollEvent, 100),
 	}
 
@@ -70,7 +70,7 @@ func (e *EpollPoller) Wait(timeout time.Duration) error {
 	for i := 0; i < n; i++ {
 		fd := e.events[i].Fd
 		if file := e.subscribed[fd]; file != nil {
-			file.NotifyReady()
+			file.notifyReady()
 		}
 	}
 
@@ -249,16 +249,19 @@ func NewEpollAsyncFile(poller *EpollPoller, f Fder) *EpollAsyncFile {
 	return eaf
 }
 
-// NotifyReady implements [AsyncReadWriteCloser].
-func (eaf *EpollAsyncFile) NotifyReady() {
+func (eaf *EpollAsyncFile) notifyReady() {
 	if eaf.readyFut != nil {
-		eaf.readyFut.SetResult(nil, nil)
+		readyFut := eaf.readyFut
+		eaf.readyFut = nil
+		readyFut.SetResult(nil, nil)
 	}
 }
 
 // WaitForReady implements [AsyncReadWriteCloser].
 func (eaf *EpollAsyncFile) WaitForReady(ctx context.Context) error {
-	eaf.readyFut = NewFuture[any]()
+	if eaf.readyFut == nil {
+		eaf.readyFut = NewFuture[any]()
+	}
 	_, err := eaf.readyFut.Await(ctx)
 	return err
 }

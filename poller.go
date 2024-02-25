@@ -11,8 +11,8 @@ type Poller interface {
 	// Close closes this Poller.
 	Close() error
 	// Wait waits for one or more I/O events. If an I/O event occurs, Wait
-	// should call the [AsyncReadWriteCloser.NotifyReady] method of the associated
-	// file handle.
+	// should wake up any coroutines waiting on [AsyncReadWriteCloser.WaitForReady]
+	// for the corresponding file handle.
 	Wait(timeout time.Duration) error
 	// WakeupThreadsafe instructs the Poller to stop waiting and return control to the event loop.
 	WakeupThreadsafe() error
@@ -29,8 +29,6 @@ type Poller interface {
 // e.g. because data is not yet available, a [syscall.EAGAIN] error will be returned.
 type AsyncReadWriteCloser interface {
 	io.ReadWriteCloser
-	// WaitForReady suspends the calling coroutine until [AsyncReadWriteCloser.NotifyReady] is called.
+	// WaitForReady suspends the calling coroutine until an I/O event occurs for this file handle.
 	WaitForReady(ctx context.Context) error
-	// NotifyReady informs the file handle that data is available, or that data has been written.
-	NotifyReady()
 }
