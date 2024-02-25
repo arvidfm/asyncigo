@@ -255,3 +255,31 @@ func ExampleAsyncIterable_UntilErr() {
 	// 4
 	// oops
 }
+
+func ExampleWait() {
+	asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
+		fut1 := asyncigo.NewFuture[string]()
+		task1 := asyncigo.SpawnTask(ctx, func(ctx context.Context) (int, error) {
+			fut1.SetResult("test", nil)
+			return 20, nil
+		})
+		task2 := asyncigo.SpawnTask(ctx, func(ctx context.Context) (float64, error) {
+			return 25.5, errors.New("oops")
+		})
+
+		var result1 string
+		var result2 int
+		var result3 float64
+		asyncigo.Wait(
+			asyncigo.WaitAll,
+			fut1.WriteResultTo(&result1),
+			task1.WriteResultTo(&result2),
+			task2.WriteResultTo(&result3),
+		).Await(ctx)
+
+		fmt.Println(result1, result2, result3)
+		return nil
+	})
+	// Output:
+	// test 20 0
+}

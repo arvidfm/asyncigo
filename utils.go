@@ -94,7 +94,7 @@ func Wait(mode WaitMode, futs ...Futurer) *Future[any] {
 			done++
 			if err != nil {
 				futErr = err
-				if mode != WaitAll {
+				if mode != WaitAll || done >= len(futs) {
 					waitFut.SetResult(nil, err)
 				}
 			} else if done >= len(futs) || mode == WaitFirstResult {
