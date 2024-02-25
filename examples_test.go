@@ -1,28 +1,28 @@
-package asyngio_test
+package asyncigo_test
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/arvidfm/asyngio"
+	"github.com/arvidfm/asyncigo"
 	"time"
 )
 
 func ExampleSpawnTask() {
-	asyngio.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
+	asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
 		var counter int
-		var tasks []asyngio.Futurer
+		var tasks []asyncigo.Futurer
 		for range 10000 {
-			tasks = append(tasks, asyngio.SpawnTask(ctx, func(ctx context.Context) (any, error) {
+			tasks = append(tasks, asyncigo.SpawnTask(ctx, func(ctx context.Context) (any, error) {
 				for range 100 {
 					counter++
-					asyngio.Sleep(ctx, time.Millisecond)
+					asyncigo.Sleep(ctx, time.Millisecond)
 				}
 				return nil, nil
 			}))
 		}
 
-		asyngio.Wait(asyngio.WaitAll, tasks...).Await(ctx)
+		asyncigo.Wait(asyncigo.WaitAll, tasks...).Await(ctx)
 
 		fmt.Println(counter)
 		return nil
@@ -32,21 +32,21 @@ func ExampleSpawnTask() {
 }
 
 func ExampleFuture_Shield() {
-	asyngio.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
-		shielded := asyngio.NewFuture[any]()
-		task1 := asyngio.SpawnTask(ctx, func(ctx context.Context) (any, error) {
+	asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
+		shielded := asyncigo.NewFuture[any]()
+		task1 := asyncigo.SpawnTask(ctx, func(ctx context.Context) (any, error) {
 			fmt.Println("waiting for shielded...")
 			return shielded.Shield().Await(ctx)
 		})
 
-		unshielded := asyngio.NewFuture[any]()
-		task2 := asyngio.SpawnTask(ctx, func(ctx context.Context) (any, error) {
+		unshielded := asyncigo.NewFuture[any]()
+		task2 := asyncigo.SpawnTask(ctx, func(ctx context.Context) (any, error) {
 			fmt.Println("waiting for unshielded...")
 			return unshielded.Await(ctx)
 		})
 
 		// yield to the event loop for one tick to initialise the tasks
-		asyngio.RunningLoop(ctx).Yield(ctx, nil)
+		asyncigo.RunningLoop(ctx).Yield(ctx, nil)
 
 		task1.Cancel(nil)
 		task2.Cancel(nil)
@@ -67,7 +67,7 @@ func ExampleFuture_Shield() {
 }
 
 func ExampleIterator_Collect() {
-	it := asyngio.Iter(func(yield func(int) bool) {
+	it := asyncigo.Iter(func(yield func(int) bool) {
 		a, b := 0, 1
 		for a < 20 {
 			if !yield(a) {
@@ -83,7 +83,7 @@ func ExampleIterator_Collect() {
 }
 
 func ExampleMapIterator_Collect() {
-	it := asyngio.MapIter(func(yield func(int, string) bool) {
+	it := asyncigo.MapIter(func(yield func(int, string) bool) {
 		_ = yield(5, "a") &&
 			yield(10, "b") &&
 			yield(15, "c")
@@ -101,7 +101,7 @@ func ExampleMapIterator_Collect() {
 }
 
 func ExampleRange() {
-	it := asyngio.Range(5)
+	it := asyncigo.Range(5)
 
 	for i := range it {
 		fmt.Println(i)
@@ -115,9 +115,9 @@ func ExampleRange() {
 }
 
 func ExampleZip() {
-	it := asyngio.Zip(
-		asyngio.AsIterator([]int{1, 2, 3, 4}),
-		asyngio.AsIterator([]string{"a", "b", "c", "d", "e"}),
+	it := asyncigo.Zip(
+		asyncigo.AsIterator([]int{1, 2, 3, 4}),
+		asyncigo.AsIterator([]string{"a", "b", "c", "d", "e"}),
 	)
 
 	for a, b := range it {
@@ -131,9 +131,9 @@ func ExampleZip() {
 }
 
 func ExampleZipLongest() {
-	it := asyngio.ZipLongest(
-		asyngio.AsIterator([]int{1, 2, 3, 4}),
-		asyngio.AsIterator([]string{"a", "b", "c", "d", "e"}),
+	it := asyncigo.ZipLongest(
+		asyncigo.AsIterator([]int{1, 2, 3, 4}),
+		asyncigo.AsIterator([]string{"a", "b", "c", "d", "e"}),
 	)
 
 	for a, b := range it {
@@ -148,7 +148,7 @@ func ExampleZipLongest() {
 }
 
 func ExampleEnumerate() {
-	it := asyngio.Enumerate(5, asyngio.AsIterator([]string{"a", "b", "c", "d"}))
+	it := asyncigo.Enumerate(5, asyncigo.AsIterator([]string{"a", "b", "c", "d"}))
 
 	for i, v := range it {
 		fmt.Printf("%d: %s\n", i, v)
@@ -161,10 +161,10 @@ func ExampleEnumerate() {
 }
 
 func ExampleFlatMap() {
-	it := asyngio.FlatMap(
-		asyngio.Range(5),
-		func(v int) asyngio.Iterator[int] {
-			return asyngio.Range(v + 1)
+	it := asyncigo.FlatMap(
+		asyncigo.Range(5),
+		func(v int) asyncigo.Iterator[int] {
+			return asyncigo.Range(v + 1)
 		},
 	)
 
@@ -174,10 +174,10 @@ func ExampleFlatMap() {
 }
 
 func ExampleChain() {
-	it := asyngio.Chain(
-		asyngio.AsIterator([]int{1, 2, 3, 4}),
-		asyngio.AsIterator([]int{5, 6, 7}),
-		asyngio.AsIterator([]int{8, 9, 10, 11, 12}),
+	it := asyncigo.Chain(
+		asyncigo.AsIterator([]int{1, 2, 3, 4}),
+		asyncigo.AsIterator([]int{5, 6, 7}),
+		asyncigo.AsIterator([]int{8, 9, 10, 11, 12}),
 	)
 
 	fmt.Println(it.Collect())
@@ -186,10 +186,10 @@ func ExampleChain() {
 }
 
 func ExampleFlatten() {
-	it := asyngio.Flatten(func(yield func(iterator asyngio.Iterator[int]) bool) {
-		_ = yield(asyngio.AsIterator([]int{1, 2, 3, 4})) &&
-			yield(asyngio.AsIterator([]int{5, 6, 7})) &&
-			yield(asyngio.AsIterator([]int{8, 9, 10, 11, 12}))
+	it := asyncigo.Flatten(func(yield func(iterator asyncigo.Iterator[int]) bool) {
+		_ = yield(asyncigo.AsIterator([]int{1, 2, 3, 4})) &&
+			yield(asyncigo.AsIterator([]int{5, 6, 7})) &&
+			yield(asyncigo.AsIterator([]int{8, 9, 10, 11, 12}))
 	})
 
 	fmt.Println(it.Collect())
@@ -198,8 +198,8 @@ func ExampleFlatten() {
 }
 
 func ExampleUniq() {
-	it := asyngio.Uniq(
-		asyngio.AsIterator([]int{1, 3, 5, 5, 8, 5, 2, 3, 9, 7, 3, 3, 4, 1}),
+	it := asyncigo.Uniq(
+		asyncigo.AsIterator([]int{1, 3, 5, 5, 8, 5, 2, 3, 9, 7, 3, 3, 4, 1}),
 	)
 
 	fmt.Println(it.Collect())
@@ -208,7 +208,7 @@ func ExampleUniq() {
 }
 
 func ExampleAsyncIter() {
-	it := asyngio.AsyncIter(func(yield func(int) error) error {
+	it := asyncigo.AsyncIter(func(yield func(int) error) error {
 		for i := range 5 {
 			if err := yield(i); err != nil {
 				return err
@@ -231,7 +231,7 @@ func ExampleAsyncIter() {
 }
 
 func ExampleAsyncIterable_UntilErr() {
-	it := asyngio.AsyncIter(func(yield func(int) error) error {
+	it := asyncigo.AsyncIter(func(yield func(int) error) error {
 		for i := range 5 {
 			if err := yield(i); err != nil {
 				return err

@@ -1,4 +1,4 @@
-package asyngio
+package asyncigo
 
 import (
 	"context"

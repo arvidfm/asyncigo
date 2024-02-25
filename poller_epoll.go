@@ -1,6 +1,6 @@
 //go:build linux && epoll
 
-package asyngio
+package asyncigo
 
 import (
 	"context"
