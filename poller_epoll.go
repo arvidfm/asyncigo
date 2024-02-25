@@ -6,12 +6,13 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"os"
 	"runtime"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // EpollPoller is an epoll-backed [Poller] implementation.

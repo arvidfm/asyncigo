@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/arvidfm/asyncigo"
 	"time"
+
+	"github.com/arvidfm/asyncigo"
 )
 
 func ExampleSpawnTask() {

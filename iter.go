@@ -2,8 +2,9 @@ package asyncigo
 
 import (
 	"context"
-	"golang.org/x/exp/constraints"
 	"iter"
+
+	"golang.org/x/exp/constraints"
 )
 
 // Iterable represents any function that can be ranged over and which yields one value.
