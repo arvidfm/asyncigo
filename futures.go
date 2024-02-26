@@ -157,9 +157,7 @@ func (f *Future[ResType]) AddResultCallback(callback func(ResType, error)) Await
 // WriteResultTo implements [Awaitable].
 func (f *Future[ResType]) WriteResultTo(dest *ResType) Awaitable[ResType] {
 	return f.AddResultCallback(func(result ResType, err error) {
-		if err == nil {
-			*dest = result
-		}
+		*dest = result
 	})
 }
 
