@@ -240,6 +240,22 @@ func (ai AsyncIterable[T]) UntilErr(err *error) Iterator[T] {
 	}
 }
 
+// YieldTo will yield all the values from this AsyncIterable
+// using the provided yield function for easier chaining
+// of iterables.
+func (ai AsyncIterable[T]) YieldTo(yield func(T) error) error {
+	for v, err := range ai {
+		if err != nil {
+			return err
+		}
+
+		if err := yield(v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // AsyncIter is a helper function for constructing an [AsyncIterable].
 func AsyncIter[T any](f func(yield func(T) error) error) AsyncIterable[T] {
 	return func(yield func(T, error) bool) {
