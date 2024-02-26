@@ -83,26 +83,29 @@ const (
 
 // Wait will wait for any or all of the given Futures to complete
 // depending on the [WaitMode] passed.
+// If any of the futures fail, the most recent error will be returned.
 // Wait will not cancel any futures.
-func Wait(mode WaitMode, futs ...Futurer) *Future[any] {
-	var done int
-	var futErr error
+func Wait(ctx context.Context, mode WaitMode, futs ...Futurer) error {
+	var completed int
+	var lastErr error
 	waitFut := NewFuture[any]()
 
 	for _, fut := range futs {
 		fut.AddDoneCallback(func(err error) {
-			done++
+			completed++
 			if err != nil {
-				futErr = err
-				if mode != WaitAll || done >= len(futs) {
-					waitFut.SetResult(nil, err)
-				}
-			} else if done >= len(futs) || mode == WaitFirstResult {
-				waitFut.SetResult(nil, futErr)
+				lastErr = err
+			}
+
+			if completed >= len(futs) ||
+				mode == WaitFirstResult ||
+				(lastErr != nil && mode == WaitFirstError) {
+				waitFut.SetResult(nil, lastErr)
 			}
 		})
 	}
-	return waitFut
+	_, err := waitFut.Await(ctx)
+	return err
 }
 
 // GetFirstResult returns the result of the first successful coroutine.

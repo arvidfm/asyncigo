@@ -10,7 +10,7 @@ import (
 )
 
 func ExampleSpawnTask() {
-	asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
+	_ = asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
 		var counter int
 		var tasks []asyncigo.Futurer
 		for range 10000 {
@@ -23,7 +23,7 @@ func ExampleSpawnTask() {
 			}))
 		}
 
-		asyncigo.Wait(asyncigo.WaitAll, tasks...).Await(ctx)
+		_ = asyncigo.Wait(ctx, asyncigo.WaitAll, tasks...)
 
 		fmt.Println(counter)
 		return nil
@@ -257,29 +257,37 @@ func ExampleAsyncIterable_UntilErr() {
 }
 
 func ExampleWait() {
-	asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
+	_ = asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
 		fut1 := asyncigo.NewFuture[string]()
 		task1 := asyncigo.SpawnTask(ctx, func(ctx context.Context) (int, error) {
+			_ = asyncigo.Sleep(ctx, time.Second)
+
 			fut1.SetResult("test", nil)
+
 			return 20, nil
 		})
 		task2 := asyncigo.SpawnTask(ctx, func(ctx context.Context) (float64, error) {
+			_ = asyncigo.Sleep(ctx, time.Second)
+
 			return 25.5, errors.New("oops")
 		})
 
 		var result1 string
 		var result2 int
 		var result3 float64
-		asyncigo.Wait(
+		err := asyncigo.Wait(
+			ctx,
 			asyncigo.WaitAll,
 			fut1.WriteResultTo(&result1),
 			task1.WriteResultTo(&result2),
 			task2.WriteResultTo(&result3),
-		).Await(ctx)
+		)
 
-		fmt.Println(result1, result2, result3)
+		fmt.Println("results:", result1, result2, result3)
+		fmt.Println("error:", err)
 		return nil
 	})
 	// Output:
-	// test 20 0
+	// results: test 20 25.5
+	// error: oops
 }

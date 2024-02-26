@@ -126,7 +126,7 @@ func TestSleep(t *testing.T) {
 				}).WriteResultTo(&results[i])
 			}
 
-			if _, err := Wait(WaitAll, tasks...).Await(ctx); err != nil {
+			if err := Wait(ctx, WaitAll, tasks...); err != nil {
 				return err
 			}
 
