@@ -1,4 +1,4 @@
-//go:build linux && epoll
+//go:build linux && !channels
 
 package asyncigo
 

@@ -4,20 +4,50 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/arvidfm/asyncigo"
 )
 
+func Example() {
+	_ = asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
+		task := asyncigo.SpawnTask(ctx, func(ctx context.Context) (int, error) {
+			for i := range 3 {
+				fmt.Printf("in subtask: %d\n", i)
+				_ = asyncigo.Sleep(ctx, time.Second)
+			}
+			return 42, nil
+		})
+
+		for j := range 3 {
+			fmt.Printf("in main task: %d\n", j)
+			_ = asyncigo.Sleep(ctx, time.Second)
+		}
+
+		result, _ := task.Await(ctx)
+		fmt.Printf("task result: %d\n", result)
+		return nil
+	})
+	// Output:
+	// in main task: 0
+	// in subtask: 0
+	// in main task: 1
+	// in subtask: 1
+	// in main task: 2
+	// in subtask: 2
+	// task result: 42
+}
+
 func ExampleSpawnTask() {
 	_ = asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
 		var counter int
 		var tasks []asyncigo.Futurer
-		for range 10000 {
+		for range 100000 {
 			tasks = append(tasks, asyncigo.SpawnTask(ctx, func(ctx context.Context) (any, error) {
-				for range 100 {
+				for range 10 {
 					counter++
-					asyncigo.Sleep(ctx, time.Millisecond)
+					_ = asyncigo.Sleep(ctx, time.Millisecond*500)
 				}
 				return nil, nil
 			}))
@@ -33,7 +63,7 @@ func ExampleSpawnTask() {
 }
 
 func ExampleFuture_Shield() {
-	asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
+	_ = asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
 		shielded := asyncigo.NewFuture[any]()
 		task1 := asyncigo.SpawnTask(ctx, func(ctx context.Context) (any, error) {
 			fmt.Println("waiting for shielded...")
@@ -47,7 +77,7 @@ func ExampleFuture_Shield() {
 		})
 
 		// yield to the event loop for one tick to initialise the tasks
-		asyncigo.RunningLoop(ctx).Yield(ctx, nil)
+		_ = asyncigo.RunningLoop(ctx).Yield(ctx, nil)
 
 		task1.Cancel(nil)
 		task2.Cancel(nil)
@@ -65,6 +95,48 @@ func ExampleFuture_Shield() {
 	// task2: context canceled
 	// shielded: <nil>
 	// unshielded: context canceled
+}
+
+// When a task has been cancelled, it will continue running, but any calls to [Awaitable.Await]
+// will immediately return [context.Canceled].
+// It's the responsibility of the task to stop early when cancelled.
+func ExampleTask_Cancel() {
+	_ = asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
+		futs := make([]asyncigo.Future[int], 10)
+		task := asyncigo.SpawnTask(ctx, func(ctx context.Context) (int, error) {
+			for i := range futs {
+				result, err := futs[i].Await(ctx)
+				fmt.Printf("%d: (%v, %v)\n", i, result, err)
+			}
+			return 0, nil
+		})
+
+		loop := asyncigo.RunningLoop(ctx)
+		for i := range futs {
+			if i == 5 {
+				task.Cancel(nil)
+			}
+
+			_ = loop.Yield(ctx, nil)
+			futs[i].SetResult(i, nil)
+		}
+
+		result, err := task.Await(ctx)
+		fmt.Printf("task result: (%v, %v)", result, err)
+		return nil
+	})
+	// Output:
+	// 0: (0, <nil>)
+	// 1: (1, <nil>)
+	// 2: (2, <nil>)
+	// 3: (3, <nil>)
+	// 4: (4, <nil>)
+	// 5: (0, context canceled)
+	// 6: (0, context canceled)
+	// 7: (0, context canceled)
+	// 8: (0, context canceled)
+	// 9: (0, context canceled)
+	// task result: (0, context canceled)
 }
 
 func ExampleIterator_Collect() {
@@ -90,10 +162,9 @@ func ExampleMapIterator_Collect() {
 			yield(15, "c")
 	})
 
-	var m map[int]string = it.Collect()
-
-	for k, v := range m {
-		fmt.Printf("%d: %s\n", k, v)
+	m := it.Collect()
+	for k := range m {
+		fmt.Printf("%d: %s\n", k, m[k])
 	}
 	// Unordered output:
 	// 5: a
@@ -208,7 +279,9 @@ func ExampleUniq() {
 	// [1 3 5 8 2 9 7 4]
 }
 
-func ExampleAsyncIter() {
+// This is a basic example showing how results and errors are yielded
+// when iterating over an [AsyncIterable].
+func ExampleAsyncIter_basic() {
 	it := asyncigo.AsyncIter(func(yield func(int) error) error {
 		for i := range 5 {
 			if err := yield(i); err != nil {
@@ -231,6 +304,7 @@ func ExampleAsyncIter() {
 	// 0 - oops
 }
 
+// Basic usage of UntilErr.
 func ExampleAsyncIterable_UntilErr() {
 	it := asyncigo.AsyncIter(func(yield func(int) error) error {
 		for i := range 5 {
@@ -256,6 +330,12 @@ func ExampleAsyncIterable_UntilErr() {
 	// oops
 }
 
+// This example creates one future and two tasks and waits for them all to finish.
+// Combining Wait with [asyncigo.Awaitable.WriteResultTo] allows for very succinct code.
+//
+// In this case, the future and one of the tasks succeed, while the second task fails with an error.
+// We can see how the error from the failing task is propagated by Wait,
+// while the results are written to the specified locations.
 func ExampleWait() {
 	_ = asyncigo.NewEventLoop().Run(context.Background(), func(ctx context.Context) error {
 		fut1 := asyncigo.NewFuture[string]()
@@ -290,4 +370,45 @@ func ExampleWait() {
 	// Output:
 	// results: test 20 25.5
 	// error: oops
+}
+
+// As Go's implementation of coroutines doesn't require us to use an "await" keyword
+// every time we call one, it's easy to write "polyglottal" functions that work both
+// synchronously and asynchronously, making the "[coloured functions]" problem less of an issue.
+//
+// This example shows how one might write a sleep function that blocks
+// if used outside an event loop, but not if an event loop is available.
+//
+// [coloured functions]: https://journal.stuffwithstuff.com/2015/02/01/what-color-is-your-function/
+func Example_polyglot() {
+	ctx := context.Background()
+	_ = sleepPolyglot(ctx, time.Second*2)
+
+	_ = asyncigo.NewEventLoop().Run(ctx, func(ctx context.Context) error {
+		start := time.Now()
+
+		numTasks := 100
+		tasks := asyncigo.Map(asyncigo.Range(numTasks), func(int) asyncigo.Futurer {
+			return asyncigo.SpawnTask(ctx, func(ctx context.Context) (any, error) {
+				_ = sleepPolyglot(ctx, time.Second*2)
+				return nil, nil
+			})
+		}).Collect()
+		_ = asyncigo.Wait(ctx, asyncigo.WaitAll, tasks...)
+
+		elapsed := time.Since(start)
+		fmt.Printf("%d tasks took %d seconds to finish\n", len(tasks), int(math.Round(elapsed.Seconds())))
+
+		return nil
+	})
+	// Output:
+	// 100 tasks took 2 seconds to finish
+}
+
+func sleepPolyglot(ctx context.Context, duration time.Duration) error {
+	if _, ok := asyncigo.RunningLoopMaybe(ctx); ok {
+		return asyncigo.Sleep(ctx, duration)
+	}
+	time.Sleep(duration)
+	return nil
 }
