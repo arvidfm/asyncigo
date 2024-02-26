@@ -309,7 +309,12 @@ func (s *EpollSocket) Write(p []byte) (n int, err error) {
 
 // Close implements [io.Closer].
 func (s *EpollSocket) Close() error {
-	return unix.Close(s.fd)
+	if s.fd < 0 {
+		return unix.EBADF
+	}
+	fd := s.fd
+	s.fd = -1
+	return unix.Close(fd)
 }
 
 // Fd implements [Fder].
