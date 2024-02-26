@@ -173,6 +173,20 @@ func (e *EventLoop) Dial(ctx context.Context, network, address string) (*AsyncSt
 	return NewAsyncStream(f), nil
 }
 
+// DialLines is a convenience method that calls [EventLoop.Dial] followed by [AsyncStream.Lines].
+// The connection attempt will be deferred until the [AsyncIterable] is ranged over.
+// If the connection fails, the connection error will be returned immediately on the first iteration.
+func (e *EventLoop) DialLines(ctx context.Context, network, address string) AsyncIterable[[]byte] {
+	return AsyncIter(func(yield func([]byte) error) error {
+		stream, err := e.Dial(ctx, network, address)
+		if err != nil {
+			return err
+		}
+
+		return stream.Lines(ctx).YieldTo(yield)
+	})
+}
+
 // Callback is a handle to a callback scheduled to be run by an [EventLoop].
 type Callback struct {
 	callback func()
