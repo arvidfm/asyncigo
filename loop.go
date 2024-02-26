@@ -16,6 +16,13 @@ func RunningLoop(ctx context.Context) *EventLoop {
 	return ctx.Value(runningLoop{}).(*EventLoop)
 }
 
+// RunningLoopMaybe returns the [EventLoop] running in the current context,
+// or nil with ok == false if no loop is running.
+func RunningLoopMaybe(ctx context.Context) (loop *EventLoop, ok bool) {
+	loop, ok = ctx.Value(runningLoop{}).(*EventLoop)
+	return loop, ok
+}
+
 // EventLoop implements the core mechanism for processing callbacks and I/O events.
 type EventLoop struct {
 	pendingCallbacks    callbackQueue
