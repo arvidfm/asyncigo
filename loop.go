@@ -104,7 +104,6 @@ func (e *EventLoop) runReadyCallbacks(ctx context.Context) {
 // withTask pushes the currently executing task to the top of the task stack
 // so that [EventLoop.Yield] knows what task's yielder to use.
 func (e *EventLoop) withTask(t tasker, step func()) {
-	oldTasks := e.currentTasks
 	e.currentTasks = append(e.currentTasks, t)
 
 	step()
@@ -112,7 +111,7 @@ func (e *EventLoop) withTask(t tasker, step func()) {
 	if e.currentTask() != t {
 		panic("context switched from unexpected task")
 	}
-	e.currentTasks = oldTasks
+	e.currentTasks = e.currentTasks[:len(e.currentTasks)-1]
 }
 
 func (e *EventLoop) currentTask() tasker {
