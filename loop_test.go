@@ -264,6 +264,10 @@ func newPipeStream(ctx context.Context, loop *EventLoop, data []byte, bufferSize
 
 func newHttpStream(ctx context.Context, loop *EventLoop, data []byte, buffer int64, throttle time.Duration) (stream *AsyncStream, close func(), err error) {
 	ts := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			return
+		}
+
 		buf := bytes.NewBuffer(data)
 		if throttle > 0 {
 			for {
@@ -280,6 +284,25 @@ func newHttpStream(ctx context.Context, loop *EventLoop, data []byte, buffer int
 			}
 		}
 	}))
+
+	waitCtx, cancel := context.WithDeadline(ctx, time.Now().Add(time.Second*5))
+	defer cancel()
+	for {
+		if err := waitCtx.Err(); err != nil {
+			return nil, nil, err
+		}
+
+		req, err := http.NewRequest(http.MethodHead, ts.URL, nil)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		_, err = http.DefaultClient.Do(req)
+		if err == nil {
+			break
+		}
+		time.Sleep(time.Millisecond * 10)
+	}
 
 	u, err := url.Parse(ts.URL)
 	if err != nil {
